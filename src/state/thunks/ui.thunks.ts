@@ -168,6 +168,7 @@ export const createDeviation = (version: VersionHistoryEntry): AppThunk => async
         if (shouldAbort(services, getState)) return;
         const versionManager = services.versionManager;
         const editHistoryManager = services.editHistoryManager;
+        const uiService = services.uiService;
         
         dispatch(appSlice.actions.closePanel());
 
@@ -177,21 +178,63 @@ export const createDeviation = (version: VersionHistoryEntry): AppThunk => async
             return;
         }
         
+        // Ask user if they want to copy versions from the original note
+        const shouldCopyVersions = await new Promise<boolean>((resolve) => {
+            const modal = new (require('obsidian')).Modal(services.app);
+            modal.titleEl.setText('Copy Version History?');
+            
+            const contentEl = modal.contentEl.createEl('p', {
+                text: 'Do you want to copy all version history from the original note to this new deviation?'
+            });
+            contentEl.style.marginBottom = '20px';
+            
+            const buttonContainer = modal.contentEl.createDiv({ cls: 'vc-deviation-modal-buttons' });
+            buttonContainer.style.display = 'flex';
+            buttonContainer.style.gap = '10px';
+            buttonContainer.style.justifyContent = 'flex-end';
+            
+            const noButton = buttonContainer.createEl('button', { text: 'No' });
+            noButton.onclick = () => {
+                modal.close();
+                resolve(false);
+            };
+            
+            const yesButton = buttonContainer.createEl('button', { text: 'Yes' });
+            yesButton.onclick = () => {
+                modal.close();
+                resolve(true);
+            };
+            
+            // Style buttons
+            yesButton.classList.add('mod-cta');
+            noButton.classList.add('mod-muted');
+            
+            modal.open();
+        });
+        
         try {
             let newFile: TFile | null = null;
             const viewMode = getState().app.viewMode;
 
             if (viewMode === 'versions') {
-                newFile = await versionManager.createDeviation(version.noteId, version.id, selectedFolder);
+                newFile = await versionManager.createDeviation(version.noteId, version.id, selectedFolder, shouldCopyVersions);
             } else {
                 const content = await editHistoryManager.getEditContent(version.noteId, version.id);
                 if (!content) throw new Error("Could not load edit content.");
                 const suffix = `(from Edit #${version.versionNumber})`;
-                newFile = await versionManager.createDeviationFromContent(version.noteId, content, selectedFolder, suffix);
+                newFile = await versionManager.createDeviationFromContent(
+                    version.noteId, 
+                    content, 
+                    selectedFolder, 
+                    suffix,
+                    shouldCopyVersions ? version.noteId : undefined,
+                    shouldCopyVersions ? version.id : undefined
+                );
             }
 
             if (newFile) {
-                uiService.showNotice(`Created new note "${newFile.basename}"...`, 5000);
+                const versionInfo = shouldCopyVersions ? ' with copied version history' : '';
+                uiService.showNotice(`Created new note "${newFile.basename}"${versionInfo}...`, 5000);
                 await app.workspace.getLeaf(true).openFile(newFile);
             }
         } catch (error) {

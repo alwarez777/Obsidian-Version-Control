@@ -1,16 +1,42 @@
+```
 # Dependencies
 node_modules/
 
-# Build output
+# Build artifacts
+dist/
 build/
+target/
 
-# Obsidian-specific
-.obsidian/
+# Environment
+.env
+.env.local
+.env.*
 
-# IDE settings
+# Cache directories
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# IDE files
 .vscode/
 .idea/
+*.swp
+*.swo
+*.tmp
 
-# OS-specific
+# Logs
+*.log
+
+# OS files
 .DS_Store
 Thumbs.db
+
+# Package manager
+package-lock.json
+yarn.lock
+```

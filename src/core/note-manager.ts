@@ -6,6 +6,7 @@ import type VersionControlPlugin from "@/main";
 import { EditHistoryManager } from "@/core";
 import { updateFrontmatter, getFrontmatterKey, DELETE } from "@/utils/frontmatter";
 import { PluginEvents } from "@/core/plugin-events";
+import { fileHandlerRegistry } from "@/core/file-handlers";
 
 export class NoteManager {
     // A temporary exclusion list to prevent event handlers from processing files
@@ -49,9 +50,17 @@ export class NoteManager {
             return { file, noteId: null, source: 'none' };
         }
 
+        // Check if file extension is supported by any handler
+        const handler = fileHandlerRegistry.getHandlerForFile(file);
+        
+        if (!handler) {
+            // Unsupported file type
+            return { file: null, noteId: null, source: 'none' };
+        }
+
+        // For .base files, we must retrieve the ID consistently using getNoteId logic
+        // which handles manifest lookups and sanitization.
         if (file.extension === 'base') {
-            // For .base files, we must retrieve the ID consistently using getNoteId logic
-            // which handles manifest lookups and sanitization.
             const noteId = await this.getNoteId(file);
             if (noteId) {
                 return { file, noteId, source: 'filepath' };
@@ -60,30 +69,28 @@ export class NoteManager {
             return { file, noteId: file.path, source: 'filepath' };
         }
 
-        if (file.extension === 'md') {
-            if (!(targetLeaf.view instanceof MarkdownView)) {
-                return { file: null, noteId: null, source: 'none' };
-            }
-
-            // Use getNoteId to handle both primary and legacy keys
-            const noteId = await this.getNoteId(file);
-
-            if (noteId) {
-                return { file, noteId, source: 'frontmatter' };
-            }
-
-            try {
-                const recoveredNoteId = await this.manifestManager.getNoteIdByPath(file.path);
-                if (recoveredNoteId) {
-                    return { file, noteId: recoveredNoteId, source: 'manifest' };
-                }
-            } catch (manifestError) {
-                console.error("Version Control: Error recovering note ID from manifest.", manifestError);
-            }
-
-            return { file, noteId: null, source: 'none' };
+        // Use handler to read metadata for supported file types (.md, .canvas, .js, .json)
+        const metadataResult = await handler.readMetadata(file);
+        
+        if (!metadataResult.isSupported) {
+            return { file: null, noteId: null, source: 'none' };
         }
-        return { file: null, noteId: null, source: 'none' };
+
+        if (metadataResult.vcId) {
+            return { file, noteId: metadataResult.vcId, source: 'frontmatter' };
+        }
+
+        // Try to recover from manifest if no ID found in file
+        try {
+            const recoveredNoteId = await this.manifestManager.getNoteIdByPath(file.path);
+            if (recoveredNoteId) {
+                return { file, noteId: recoveredNoteId, source: 'manifest' };
+            }
+        } catch (manifestError) {
+            console.error("Version Control: Error recovering note ID from manifest.", manifestError);
+        }
+
+        return { file, noteId: null, source: 'none' };
     }
 
     async getNoteId(file: TFile): Promise<string | null> {
@@ -113,6 +120,7 @@ export class NoteManager {
 
         if (winnerId) {
             // If we found a canonical ID for this path, we enforce it.
+            // Use appropriate handler based on file extension
             if (file.extension === 'md') {
                 const fileCache = this.app.metadataCache.getFileCache(file);
                 const currentFmId = fileCache?.frontmatter?.[this.noteIdKey];
@@ -127,6 +135,12 @@ export class NoteManager {
                 if (currentFmId !== winnerId || hasLegacyKeys) {
                     await this.writeNoteIdToFrontmatter(file, winnerId);
                 }
+            } else if (file.extension === 'canvas' || file.extension === 'json' || file.extension === 'js') {
+                // For non-md files, use the handler to write metadata
+                const handler = fileHandlerRegistry.getHandlerForFile(file);
+                if (handler) {
+                    await handler.writeMetadata(file, { vcId: winnerId });
+                }
             }
             return winnerId;
         }
@@ -137,35 +151,20 @@ export class NoteManager {
             return generateNoteId(this.plugin.settings, file);
         }
 
-        let noteId: string | null = null;
-
-        if (file.extension === 'md') {
-            const fileCache = this.app.metadataCache.getFileCache(file);
-            const frontmatter = fileCache?.frontmatter;
-
-            // Check Primary Key
-            let id = frontmatter?.[this.noteIdKey];
-            if (this.isValidId(id)) {
-                noteId = id;
-            } else {
-                // Check Legacy Keys
-                for (const legacyKey of this.legacyNoteIdKeys) {
-                    id = frontmatter?.[legacyKey];
-                    if (this.isValidId(id)) {
-                        // Found valid ID in legacy key. Migrate it silently.
-                        await this.migrateLegacyKey(file, legacyKey, this.noteIdKey, id).catch(e => 
-                            console.error(`VC: Failed to migrate legacy key '${legacyKey}' to '${this.noteIdKey}' for file '${file.path}'`, e)
-                        );
-                        noteId = id;
-                        break;
-                    }
-                }
-            }
+        // Use handler to read metadata for supported file types
+        const handler = fileHandlerRegistry.getHandlerForFile(file);
+        if (!handler) {
+            return null;
         }
 
-        if (noteId) {
-            await this.ensurePathConsistency(noteId, file.path);
+        const metadataResult = await handler.readMetadata(file);
+        
+        if (!metadataResult.isSupported || !metadataResult.vcId) {
+            return null;
         }
+
+        const noteId = metadataResult.vcId;
+        await this.ensurePathConsistency(noteId, file.path);
 
         return noteId;
     }
@@ -220,6 +219,7 @@ export class NoteManager {
      * Ensures a note has a version control ID.
      * For .md files, it ensures the ID is in the frontmatter.
      * For .base files, it returns the file path.
+     * For .canvas/.json/.js files, it writes the ID using the appropriate handler.
      * This method does NOT create any database entries; that is deferred until the first save.
      * @param file The TFile to get or create an ID for.
      * @returns The note's version control ID, or null if one couldn't be assigned.
@@ -231,13 +231,14 @@ export class NoteManager {
             return existingId;
         }
 
-        if (file.extension === 'md') {
-            // If no ID, generate one based on settings and write it to the file.
-            let newId = generateNoteId(this.plugin.settings, file);
-            
-            // Ensure uniqueness
-            newId = await this.manifestManager.ensureUniqueNoteId(newId);
+        // Generate a new ID
+        let newId = generateNoteId(this.plugin.settings, file);
+        
+        // Ensure uniqueness
+        newId = await this.manifestManager.ensureUniqueNoteId(newId);
 
+        // Write ID using appropriate handler based on file extension
+        if (file.extension === 'md') {
             try {
                 await this.writeNoteIdToFrontmatter(file, newId);
                 return newId;
@@ -245,7 +246,25 @@ export class NoteManager {
                 console.error(`VC: Failed to write new vc-id to frontmatter for "${file.path}".`, error);
                 throw new Error(`Failed to initialize version history for "${file.basename}". Could not write to frontmatter.`);
             }
+        } else if (file.extension === 'canvas' || file.extension === 'json' || file.extension === 'js') {
+            // Use file handler for non-md files
+            const handler = fileHandlerRegistry.getHandlerForFile(file);
+            if (!handler) {
+                return null;
+            }
+            
+            try {
+                const success = await handler.writeMetadata(file, { vcId: newId });
+                if (!success) {
+                    throw new Error(`Failed to write metadata to ${file.extension} file`);
+                }
+                return newId;
+            } catch (error) {
+                console.error(`VC: Failed to write new vc-id to ${file.extension} file "${file.path}".`, error);
+                throw new Error(`Failed to initialize version history for "${file.basename}". Could not write to file.`);
+            }
         }
+        
         return null;
     }
 
@@ -306,9 +325,16 @@ export class NoteManager {
                     // Perform the rename operation (Folder rename + Manifest updates)
                     await this.manifestManager.renameNoteEntry(noteIdToUpdate, uniqueNewId);
                     
+                    // Update metadata using appropriate handler based on file extension
                     if (file.extension === 'md') {
                         // Update the frontmatter in the file for .md files
                         await this.writeNoteIdToFrontmatter(file, uniqueNewId);
+                    } else if (file.extension === 'canvas' || file.extension === 'json' || file.extension === 'js') {
+                        // Use file handler for non-md files
+                        const handler = fileHandlerRegistry.getHandlerForFile(file);
+                        if (handler) {
+                            await handler.writeMetadata(file, { vcId: uniqueNewId });
+                        }
                     }
                     
                     // We also need to update the path in the manifest (which is now under new ID)
@@ -371,8 +397,14 @@ export class NoteManager {
                 
                 await this.manifestManager.renameNoteEntry(currentId, uniqueNewId);
                 
+                // Update metadata using appropriate handler based on file extension
                 if (file.extension === 'md') {
                     await this.writeNoteIdToFrontmatter(file, uniqueNewId);
+                } else if (file.extension === 'canvas' || file.extension === 'json' || file.extension === 'js') {
+                    const handler = fileHandlerRegistry.getHandlerForFile(file);
+                    if (handler) {
+                        await handler.writeMetadata(file, { vcId: uniqueNewId });
+                    }
                 }
                 
                 await this.manifestManager.updateNotePath(uniqueNewId, file.path);
