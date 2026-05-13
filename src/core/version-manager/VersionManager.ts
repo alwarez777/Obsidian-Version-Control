@@ -15,6 +15,7 @@ import { QueueService } from '@/services';
 import { SettingsResolver, type LoosePartial } from '@/core/settings';
 import { updateFrontmatter, DELETE } from "@/utils/frontmatter";
 import type { EditHistoryManager } from '@/core';
+import { fileHandlerRegistry } from '@/core/file-handlers';
 
 export class VersionManager {
   private readonly saveOperation: SaveOperation;
@@ -134,21 +135,47 @@ export class VersionManager {
 
   public async restoreVersion(liveFile: TFile, noteId: string, versionId: string): Promise<boolean> {
     const result = await this.restoreOperation.execute(liveFile, noteId, versionId);
-    if (result && liveFile.extension === 'md') {
-      await this.noteManager.writeNoteIdToFrontmatter(liveFile, noteId);
+    if (result) {
+      // Write metadata using appropriate handler based on file extension
+      if (liveFile.extension === 'md') {
+        await this.noteManager.writeNoteIdToFrontmatter(liveFile, noteId);
+      } else if (liveFile.extension === 'canvas' || liveFile.extension === 'json' || liveFile.extension === 'js') {
+        const handler = fileHandlerRegistry.getHandlerForFile(liveFile);
+        if (handler) {
+          await handler.writeMetadata(liveFile, { vcId: noteId });
+        }
+      }
     }
     return result;
   }
 
-  public async createDeviation(noteId: string, versionId: string, targetFolder: TFolder | null): Promise<TFile | null> {
+  public async createDeviation(noteId: string, versionId: string, targetFolder: TFolder | null, copyVersions: boolean = false): Promise<TFile | null> {
     VersionValidator.validateDeviationParams(noteId, versionId);
+    
+    // Load version metadata to get version number
+    const noteManifest = await this.manifestManager.loadNoteManifest(noteId);
+    if (!noteManifest) {
+      throw new Error('Note manifest not found for deviation');
+    }
+    
+    const currentBranch = noteManifest.branches[noteManifest.currentBranch];
+    if (!currentBranch || !currentBranch.versions[versionId]) {
+      throw new Error('Version not found in current branch');
+    }
+    
+    const versionData = currentBranch.versions[versionId];
+    const versionNumber = versionData.versionNumber;
+    
     const versionContent = await this.getVersionContent(noteId, versionId);
     if (versionContent === null) throw new Error('Could not load version content for deviation.');
-    const suffix = `(from V${versionId.substring(0, 6)}...)`;
-    return this.createDeviationFromContent(noteId, versionContent, targetFolder, suffix);
+    
+    // Use format: "Note Name vX" where X is the version number
+    const suffix = `v${versionNumber}`;
+    
+    return this.createDeviationFromContent(noteId, versionContent, targetFolder, suffix, copyVersions ? noteId : undefined, versionId);
   }
 
-  public async createDeviationFromContent(noteId: string, content: string, targetFolder: TFolder | null, suffix: string): Promise<TFile | null> {
+  public async createDeviationFromContent(noteId: string, content: string, targetFolder: TFolder | null, suffix: string, sourceNoteId?: string, sourceVersionId?: string): Promise<TFile | null> {
     VersionValidator.validateDeviationParams(noteId);
     const noteManifest = await this.manifestManager.loadNoteManifest(noteId);
     const originalFile = noteManifest ? this.app.vault.getAbstractFileByPath(noteManifest.notePath) : null;
@@ -193,7 +220,30 @@ export class VersionManager {
           });
           throw new Error(`Failed to create a clean deviation.`);
         }
+      } else if (extension === 'canvas' || extension === 'json' || extension === 'js') {
+        // For non-md files, remove metadata using the handler
+        try {
+          const handler = fileHandlerRegistry.getHandlerForFile(newFile);
+          if (handler) {
+            await handler.removeMetadata(newFile);
+          }
+        } catch (metaError) {
+          console.error(`VC: Failed to remove vc-id from new deviation file "${newFilePath}". Trashing.`, metaError);
+          await this.app.vault.trash(newFile, true).catch((delErr) => {
+            console.error(`VC: CRITICAL: Failed to trash corrupted deviation file "${newFilePath}".`, delErr);
+          });
+          throw new Error(`Failed to create a clean deviation.`);
+        }
       }
+      
+      // If copyVersions is true and sourceNoteId is provided, copy versions from source to new deviation
+      if (sourceNoteId && sourceVersionId) {
+        await this.copyVersionsToDeviation(sourceNoteId, newFile, sourceVersionId);
+      } else if (sourceNoteId) {
+        // Fallback for backward compatibility - copy all versions
+        await this.copyVersionsToDeviation(sourceNoteId, newFile);
+      }
+      
       return newFile;
     } catch (error) {
       console.error(`VC: Failed to create deviation for note ${noteId}.`, error);
@@ -201,6 +251,109 @@ export class VersionManager {
     } finally {
       // CRITICAL: Only remove from pending list after all operations (success or failure) are complete
       this.noteManager.removePendingDeviation(newFilePath);
+    }
+  }
+
+  /**
+   * Copies versions from a source note to a deviation (new note).
+   * If sourceVersionId is provided, copies only versions up to and including that version.
+   * Creates a new branch in the deviation's manifest with copied version entries.
+   * Version content files are duplicated with new naming convention.
+   */
+  private async copyVersionsToDeviation(sourceNoteId: string, deviationFile: TFile, sourceVersionId?: string): Promise<void> {
+    try {
+      // Generate a new note ID for the deviation
+      const deviationNoteId = await this.noteManager.getOrCreateNoteId(deviationFile);
+      if (!deviationNoteId) {
+        throw new Error('Failed to create note ID for deviation');
+      }
+
+      // Load source note manifest
+      const sourceManifest = await this.manifestManager.loadNoteManifest(sourceNoteId);
+      if (!sourceManifest) {
+        throw new Error('Source note manifest not found');
+      }
+
+      const sourceBranchName = sourceManifest.currentBranch;
+      const sourceBranch = sourceManifest.branches[sourceBranchName];
+      if (!sourceBranch || !sourceBranch.versions || Object.keys(sourceBranch.versions).length === 0) {
+        // No versions to copy
+        return;
+      }
+
+      // Filter versions: if sourceVersionId is provided, include only versions up to and including it
+      let versionEntries = Object.entries(sourceBranch.versions);
+      if (sourceVersionId) {
+        const sourceVersionData = sourceBranch.versions[sourceVersionId];
+        if (!sourceVersionData) {
+          throw new Error(`Source version ${sourceVersionId} not found`);
+        }
+        const cutoffTimestamp = new Date(sourceVersionData.timestamp).getTime();
+        
+        // Include only versions with timestamp <= cutoff (i.e., created before or at the same time as sourceVersionId)
+        versionEntries = versionEntries.filter(([, versionData]) => {
+          const versionTimestamp = new Date(versionData.timestamp).getTime();
+          return versionTimestamp <= cutoffTimestamp;
+        });
+        
+        // Sort by versionNumber to ensure correct order
+        versionEntries.sort((a, b) => a[1].versionNumber - b[1].versionNumber);
+      }
+
+      // Create a new branch in the deviation's manifest for copied versions
+      const copiedBranchName = 'copied-versions';
+      
+      // Initialize deviation manifest with the copied branch
+      await this.manifestManager.updateNoteManifest(deviationNoteId, deviationManifest => {
+        const currentBranchSettings = sourceBranch.settings;
+        const newBranch: Branch = { 
+          versions: {}, 
+          totalVersions: 0,
+          state: sourceBranch.state ? { ...sourceBranch.state } : undefined
+        };
+        if (currentBranchSettings) {
+          newBranch.settings = { ...currentBranchSettings };
+        }
+        deviationManifest.branches[copiedBranchName] = newBranch;
+        deviationManifest.currentBranch = copiedBranchName;
+      });
+
+      // Copy each version entry and content
+      for (const [versionId, versionData] of versionEntries) {
+        // Read version content from source
+        const versionContent = await this.versionContentRepo.read(sourceNoteId, versionId);
+        if (!versionContent) {
+          console.warn(`VC: Could not read version ${versionId} from source ${sourceNoteId}, skipping...`);
+          continue;
+        }
+
+        // Generate new version ID for the deviation
+        const timestamp = new Date(versionData.timestamp).getTime().toString();
+        const newVersionId = `${deviationNoteId}_${timestamp}`;
+
+        // Save version content to the deviation's version storage
+        await this.versionContentRepo.write(deviationNoteId, newVersionId, versionContent);
+
+        // Add version entry to deviation's manifest
+        await this.manifestManager.updateNoteManifest(deviationNoteId, deviationManifest => {
+          const branch = deviationManifest.branches[copiedBranchName];
+          if (branch) {
+            const { id: _, ...versionDataWithoutId } = versionData as any;
+            branch.versions[newVersionId] = {
+              ...versionDataWithoutId,
+              // Update any metadata that should reflect the new context
+              originalVersionId: versionId,
+              originalNoteId: sourceNoteId,
+            };
+            branch.totalVersions = (branch.totalVersions || 0) + 1;
+          }
+        });
+      }
+
+      console.log(`VC: Successfully copied ${versionEntries.length} versions from ${sourceNoteId} to deviation ${deviationNoteId}`);
+    } catch (error) {
+      console.error(`VC: Failed to copy versions to deviation`, error);
+      throw error;
     }
   }
 
