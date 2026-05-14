@@ -229,6 +229,52 @@ export class PathService {
     }
 
     /**
+     * Generates the path to the plugin's trash folder.
+     * This is where version data for deleted notes is stored temporarily.
+     * @returns {string} Normalized path to the trash directory.
+     */
+    public getTrashPath(): string {
+        try {
+            const dbRoot = this.getDbRoot();
+            const rawPath = `${dbRoot}/.trash`;
+            const normalized = normalizePath(rawPath);
+
+            if (!normalized || typeof normalized !== 'string') {
+                throw new Error('Path normalization failed for trash path.');
+            }
+
+            return normalized;
+        } catch (error) {
+            throw new Error(`PathService.getTrashPath: Failed to generate trash path: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+    }
+
+    /**
+     * Generates the path for a specific note's trash folder.
+     * @param {string} noteId - Unique identifier for the note.
+     * @returns {string} Normalized path to the note's trash folder.
+     */
+    public getNoteTrashPath(noteId: string): string {
+        this.validateNoteId(noteId, 'getNoteTrashPath');
+
+        try {
+            const trashRoot = this.getTrashPath();
+            const sanitizedNoteId = this.sanitizePathComponent(noteId);
+            
+            const rawPath = `${trashRoot}/${sanitizedNoteId}`;
+            const normalized = normalizePath(rawPath);
+
+            if (!normalized || typeof normalized !== 'string') {
+                throw new Error('Path normalization failed for note trash path.');
+            }
+
+            return normalized;
+        } catch (error) {
+            throw new Error(`PathService.getNoteTrashPath: Failed to generate path for noteId "${noteId}": ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+    }
+
+    /**
      * Validates that a noteId is a non-empty, non-whitespace string using valibot.
      * @param {unknown} noteId - The note identifier to validate.
      * @param {string} methodName - Name of the calling method for error context.

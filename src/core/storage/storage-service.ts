@@ -141,4 +141,73 @@ export class StorageService {
             }
         );
     }
+
+    /**
+     * Recursively copies a folder and all its contents to a new location.
+     * Used for moving version data to trash or other backup operations.
+     */
+    public async copyFolder(sourcePath: string, destPath: string): Promise<void> {
+        await executeWithRetry(
+            async () => {
+                const sourceExists = await this.vault.adapter.exists(sourcePath);
+                if (!sourceExists) {
+                    throw new Error(`Source folder "${sourcePath}" does not exist.`);
+                }
+
+                // Ensure destination parent folder exists
+                const destParent = destPath.substring(0, destPath.lastIndexOf('/'));
+                if (destParent) {
+                    await this.ensureFolderExists(destParent);
+                }
+
+                // Get all files recursively from source
+                const files = await this.vault.adapter.list(sourcePath);
+                
+                // Copy all files
+                for (const filePath of files.files) {
+                    const content = await this.vault.adapter.read(filePath);
+                    const relativePath = filePath.substring(sourcePath.length + 1);
+                    const destFilePath = `${destPath}/${relativePath}`;
+                    
+                    const destFileParent = destFilePath.substring(0, destFilePath.lastIndexOf('/'));
+                    if (destFileParent) {
+                        await this.ensureFolderExists(destFileParent);
+                    }
+                    
+                    await this.vault.adapter.write(destFilePath, content);
+                }
+
+                // Recursively copy subfolders
+                for (const folderPath of files.folders) {
+                    const relativePath = folderPath.substring(sourcePath.length + 1);
+                    const destFolderPath = `${destPath}/${relativePath}`;
+                    await this.copyFolder(folderPath, destFolderPath);
+                }
+            },
+            {
+                context: `copyFolder:${sourcePath}->${destPath}`,
+                validateSuccess: async () => {
+                    const destExists = await this.vault.adapter.exists(destPath);
+                    return destExists;
+                }
+            }
+        );
+    }
+
+    /**
+     * Moves a folder to the trash by copying it first, then deleting the original.
+     * This is safer than direct move as it ensures data is preserved even if deletion fails.
+     */
+    public async moveFolderToTrash(sourcePath: string, trashPath: string): Promise<void> {
+        try {
+            // First copy to trash
+            await this.copyFolder(sourcePath, trashPath);
+            
+            // Then delete original
+            await this.permanentlyDeleteFolder(sourcePath);
+        } catch (error) {
+            console.error(`VC: Failed to move folder to trash from ${sourcePath}`, error);
+            throw error;
+        }
+    }
 }

@@ -181,10 +181,10 @@ export const createDeviation = (version: VersionHistoryEntry): AppThunk => async
         // Ask user if they want to copy versions from the original note
         const shouldCopyVersions = await new Promise<boolean>((resolve) => {
             const modal = new (require('obsidian')).Modal(services.app);
-            modal.titleEl.setText('Copy Version History?');
+            modal.titleEl.setText('Create New Note from Version');
             
             const contentEl = modal.contentEl.createEl('p', {
-                text: 'Do you want to copy all version history from the original note to this new deviation?'
+                text: 'Do you want to add existing versions for the new note? If yes, the new note will receive a copy of version history up to and including the selected version.'
             });
             contentEl.style.marginBottom = '20px';
             
@@ -236,6 +236,10 @@ export const createDeviation = (version: VersionHistoryEntry): AppThunk => async
                 const versionInfo = shouldCopyVersions ? ' with copied version history' : '';
                 uiService.showNotice(`Created new note "${newFile.basename}"${versionInfo}...`, 5000);
                 await app.workspace.getLeaf(true).openFile(newFile);
+                
+                // CRITICAL: Remove the new file from pending deviation list after successful creation
+                // This allows normal event handling to resume for this file
+                services.noteManager.removePendingDeviation(newFile.path);
             }
         } catch (error) {
             console.error("Version Control: Error creating deviation.", error);

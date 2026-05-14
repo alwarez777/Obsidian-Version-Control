@@ -60,8 +60,12 @@ export function registerSystemEventListeners(plugin: VersionControlPlugin, store
     // create: Stable, extension-specific filtering.
     plugin.registerEvent(
         plugin.app.vault.on('create', (file: TAbstractFile) => {
-            if (file instanceof TFile && file.extension === 'base') {
-                store.dispatch(thunks.handleVaultSave(file));
+            if (file instanceof TFile && (file.extension === 'md' || file.extension === 'base')) {
+                // Check if this file was previously trashed and restore version data
+                store.dispatch(thunks.handleFileCreate(file));
+                if (file.extension === 'base') {
+                    store.dispatch(thunks.handleVaultSave(file));
+                }
             }
         })
     );
