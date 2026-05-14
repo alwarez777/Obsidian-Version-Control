@@ -268,6 +268,15 @@ export class VersionManager {
         throw new Error('Failed to create note ID for deviation');
       }
 
+      // CRITICAL: Ensure the note is registered in the central manifest before copying versions
+      // This is especially important for {path} format IDs which aren't auto-registered on file creation
+      const centralManifest = await this.manifestManager.loadCentralManifest();
+      if (!centralManifest.notes[deviationNoteId]) {
+        // Register the deviation in the central manifest
+        const noteManifestPath = `.versiondb/${deviationNoteId}.json`;
+        await this.manifestManager.registerNoteInCentralManifest(deviationNoteId, deviationFile.path, noteManifestPath);
+      }
+
       // Load source note manifest
       const sourceManifest = await this.manifestManager.loadNoteManifest(sourceNoteId);
       if (!sourceManifest) {

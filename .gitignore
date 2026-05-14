@@ -2,41 +2,15 @@
 # Dependencies
 node_modules/
 
-# Build artifacts
-dist/
-build/
-target/
-
 # Environment
 .env
 .env.local
 .env.*
 
-# Cache directories
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-.pytest_cache/
-.mypy_cache/
-.coverage
-
-# IDE files
+# Editors
 .vscode/
-.idea/
-*.swp
-*.swo
-*.tmp
 
 # Logs
 *.log
 
-# OS files
-.DS_Store
-Thumbs.db
-
-# Package manager
-package-lock.json
-yarn.lock
 ```
