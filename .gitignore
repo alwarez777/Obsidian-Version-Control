@@ -1,1 +1,16 @@
-Nothing should be ignored since only source files (.js, .css) are in the changes.
+```
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.local
+.env.*
+
+# Editors
+.vscode/
+
+# Logs
+*.log
+
+```

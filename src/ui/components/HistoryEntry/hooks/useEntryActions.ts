@@ -112,6 +112,7 @@ export function useEntryActions(
             e.preventDefault();
             dispatch(appSlice.actions.stopVersionEditing());
         }
+        // Save on Ctrl+Enter or Cmd+Enter (macOS)
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
             e.preventDefault();
             saveDetails();
