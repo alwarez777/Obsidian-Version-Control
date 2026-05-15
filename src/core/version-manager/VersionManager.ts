@@ -272,9 +272,12 @@ export class VersionManager {
       // This is especially important for {path} format IDs which aren't auto-registered on file creation
       const centralManifest = await this.manifestManager.loadCentralManifest();
       if (!centralManifest.notes[deviationNoteId]) {
-        // Register the deviation in the central manifest
-        const noteManifestPath = `.versiondb/${deviationNoteId}.json`;
-        await this.manifestManager.registerNoteInCentralManifest(deviationNoteId, deviationFile.path, noteManifestPath);
+        // Register the deviation in the central manifest using createNoteEntry logic
+        await this.manifestManager.centralManifestRepo.addNoteEntry(
+          deviationNoteId, 
+          deviationFile.path, 
+          this.manifestManager.pathService.getNoteManifestPath(deviationNoteId)
+        );
       }
 
       // Load source note manifest
