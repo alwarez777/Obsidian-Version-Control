@@ -153,6 +153,18 @@ export class ManifestManager {
         }
     }
 
+    public async markNoteAsTrashed(noteId: string, notePath: string): Promise<void> {
+        await this.centralManifestRepo.markNoteAsTrashed(noteId, notePath);
+    }
+
+    public async restoreNoteFromTrash(noteId: string, notePath: string): Promise<void> {
+        await this.centralManifestRepo.restoreNoteFromTrash(noteId, notePath);
+    }
+
+    public async isNoteTrashed(noteId: string): Promise<boolean> {
+        return this.centralManifestRepo.isNoteTrashed(noteId);
+    }
+
     public async updateNotePath(noteId: string, newPath: string): Promise<void> {
         await this.noteManifestRepo.update(noteId, (manifest) => {
             manifest.notePath = newPath;
