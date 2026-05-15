@@ -169,8 +169,8 @@ export class VersionManager {
     const versionContent = await this.getVersionContent(noteId, versionId);
     if (versionContent === null) throw new Error('Could not load version content for deviation.');
     
-    // Use format: "Note Name vX" where X is the version number
-    const suffix = `v${versionNumber}`;
+    // Use format: "Note Name _ version from Version Control" as per requirements
+    const suffix = `_ version from Version Control`;
     
     return this.createDeviationFromContent(noteId, versionContent, targetFolder, suffix, copyVersions ? noteId : undefined, versionId);
   }
@@ -272,9 +272,12 @@ export class VersionManager {
       // This is especially important for {path} format IDs which aren't auto-registered on file creation
       const centralManifest = await this.manifestManager.loadCentralManifest();
       if (!centralManifest.notes[deviationNoteId]) {
-        // Register the deviation in the central manifest
-        const noteManifestPath = `.versiondb/${deviationNoteId}.json`;
-        await this.manifestManager.registerNoteInCentralManifest(deviationNoteId, deviationFile.path, noteManifestPath);
+        // Register the deviation in the central manifest using createNoteEntry logic
+        await this.manifestManager.centralManifestRepo.addNoteEntry(
+          deviationNoteId, 
+          deviationFile.path, 
+          this.manifestManager.pathService.getNoteManifestPath(deviationNoteId)
+        );
       }
 
       // Load source note manifest

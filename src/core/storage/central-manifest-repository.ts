@@ -69,13 +69,32 @@ export class CentralManifestRepository {
         });
     }
 
-    public async removeNoteEntry(noteId: string): Promise<void> {
+    public async markNoteAsTrashed(noteId: string, notePath: string): Promise<void> {
         await this._updateAndSaveManifest(draft => {
-            if (!draft.notes[noteId]) {
-                return;
+            const entry = draft.notes[noteId];
+            if (entry) {
+                entry.trashed = true;
+                entry.trashedAt = new Date().toISOString();
+                entry.originalPath = notePath;
             }
-            delete draft.notes[noteId];
         });
+    }
+
+    public async restoreNoteFromTrash(noteId: string, notePath: string): Promise<void> {
+        await this._updateAndSaveManifest(draft => {
+            const entry = draft.notes[noteId];
+            if (entry && entry.trashed) {
+                entry.trashed = false;
+                delete entry.trashedAt;
+                entry.notePath = notePath;
+            }
+        });
+    }
+
+    public async isNoteTrashed(noteId: string): Promise<boolean> {
+        const manifest = await this.load();
+        const entry = manifest.notes[noteId];
+        return entry?.trashed === true;
     }
 
     public async updateNotePath(noteId: string, newPath: string): Promise<void> {

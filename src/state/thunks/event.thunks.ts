@@ -120,25 +120,43 @@ export const handleFileDelete = (file: TAbstractFile): AppThunk => async (dispat
     const uiService = services.uiService;
     const plugin = services.plugin;
     const eventBus = services.eventBus;
+    const pathService = services.pathService;
+    const app = services.app;
 
-    // Helper to delete all data for a specific note ID
-    const deleteDataForNote = async (noteId: string, notePath: string) => {
+    // Helper to move all data for a specific note ID to trash
+    const moveDataToTrash = async (noteId: string, notePath: string) => {
         try {
-            // 1. Delete Version History (Physical Folder + Central Manifest Entry)
-            // This removes the note from central manifest and deletes the .versiondb/{noteId} folder
-            await manifestManager.deleteNoteEntry(noteId);
+            const noteTrashPath = pathService.getNoteTrashPath(noteId);
             
-            // 2. Delete Edit History (IndexedDB)
-            // This removes all edit entries and the branch data from IDB
-            await editHistoryManager.deleteNoteHistory(noteId);
+            // 1. Move Version History folder to trash
+            // Get the current version db path for this note
+            const versionDbPath = `.versiondb/${noteId}`;
+            const versionDbFolder = app.vault.getAbstractFileByPath(versionDbPath);
             
-            // 3. Clear Timeline (IndexedDB) via Event Bus
-            // TimelineManager listens to 'history-deleted' and clears the timeline for the note
-            eventBus.trigger('history-deleted', noteId);
+            if (versionDbFolder instanceof TFolder) {
+                // Create trash directory if it doesn't exist
+                const trashFolder = app.vault.getAbstractFileByPath(noteTrashPath);
+                if (!trashFolder) {
+                    await app.vault.createFolder(noteTrashPath);
+                }
+                
+                // Move the entire version folder to trash using storageService
+                const trashVersionPath = `${noteTrashPath}/versiondb`;
+                await services.storageService.moveFolderToTrash(versionDbPath, trashVersionPath);
+            }
             
-            console.log(`VC: Deleted version control data for "${notePath}" (ID: ${noteId})`);
+            // 2. Update Central Manifest to mark as trashed (not delete)
+            // We keep the entry but mark it as in-trash for potential restoration
+            await manifestManager.markNoteAsTrashed(noteId, notePath);
+            
+            // 3. Edit History stays in IndexedDB - we just flag it as trashed
+            // The actual data remains recoverable
+            await editHistoryManager.markNoteHistoryAsTrashed(noteId);
+            
+            console.log(`VC: Moved version control data to trash for "${notePath}" (ID: ${noteId})`);
         } catch (error) {
-            console.error(`VC: Failed to delete data for "${notePath}"`, error);
+            console.error(`VC: Failed to move data to trash for "${notePath}"`, error);
+            throw error; // Re-throw to prevent deletion notice from showing
         }
     };
 
@@ -158,8 +176,12 @@ export const handleFileDelete = (file: TAbstractFile): AppThunk => async (dispat
 
         const noteId = await manifestManager.getNoteIdByPath(file.path);
         if (noteId) {
-            await deleteDataForNote(noteId, file.path);
-            deletedCount++;
+            try {
+                await moveDataToTrash(noteId, file.path);
+                deletedCount++;
+            } catch (error) {
+                console.error(`VC: Failed to move "${file.path}" to trash, data may be lost`, error);
+            }
         }
 
     } else if (file instanceof TFolder) {
@@ -173,7 +195,7 @@ export const handleFileDelete = (file: TAbstractFile): AppThunk => async (dispat
         );
 
         if (notesToDelete.length > 0) {
-            console.log(`VC: Folder "${file.path}" deleted. Cleaning up ${notesToDelete.length} affected notes.`);
+            console.log(`VC: Folder "${file.path}" deleted. Moving ${notesToDelete.length} affected notes to trash.`);
             
             for (const [noteId, entry] of notesToDelete) {
                 // Cancel auto-save if active
@@ -183,19 +205,23 @@ export const handleFileDelete = (file: TAbstractFile): AppThunk => async (dispat
                     plugin.autoSaveDebouncers.delete(entry.notePath);
                 }
 
-                await deleteDataForNote(noteId, entry.notePath);
-                deletedCount++;
+                try {
+                    await moveDataToTrash(noteId, entry.notePath);
+                    deletedCount++;
+                } catch (error) {
+                    console.error(`VC: Failed to move "${entry.notePath}" to trash`, error);
+                }
             }
         }
     }
 
     // Feedback and State Update
     if (deletedCount > 0) {
-        // Show Notice
+        // Show Notice about trash (NOT deletion)
         if (deletedCount === 1) {
-            uiService.showNotice(`Version control data deleted for "${file.name}".`);
+            uiService.showNotice(`Заметка удалена. Версии перемещены в корзину плагина и будут восстановлены вместе с файлом`, 5000);
         } else {
-            uiService.showNotice(`Version control data deleted for ${deletedCount} notes in "${file.name}".`);
+            uiService.showNotice(`Версии ${deletedCount} заметок перемещены в корзину плагина`, 5000);
         }
         
         // Clear active note if it was deleted or inside deleted folder
